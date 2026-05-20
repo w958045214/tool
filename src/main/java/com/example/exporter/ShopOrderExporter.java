@@ -29,10 +29,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Locale;
 import java.util.Set;
 
 /**
@@ -40,7 +41,7 @@ import java.util.Set;
  *
  * <p>功能：</p>
  * <ul>
- *     <li>按代码中预设的「店铺名称 -> 商品 ID 集合」筛选订单。</li>
+ *     <li>从指定配置文件读取「店铺名称 -> 商品 ID 集合」，并据此筛选订单。</li>
  *     <li>仅导出订单状态为「已成团」的数据。</li>
  *     <li>按店铺动态生成 CSV 或 XLSX 文件。</li>
  *     <li>流式读取输入 CSV，避免一次性加载大文件到内存。</li>
@@ -51,14 +52,19 @@ public class ShopOrderExporter {
     /** 输入 CSV 文件路径：按实际环境修改。 */
     private static final String SOURCE_CSV = "/Users/test/Desktop/order.csv";
 
+    /** 店铺商品关系文件路径：一行一组数据，格式为「店铺名称 空格 商品ID」。 */
+    private static final String SHOP_GOODS_FILE = "/Users/test/Desktop/shop_goods.txt";
+
     /** 输出目录：按实际环境修改。 */
     private static final String OUTPUT_DIR = "/Users/test/Desktop/output/";
 
     /** true 输出 xlsx；false 输出 csv。 */
     private static final boolean EXPORT_XLSX = true;
 
-    /** 输入 CSV 中用于筛选订单状态的固定值。 */
-    private static final String TARGET_ORDER_STATUS = "已成团";
+    /** 输入 CSV 中用于筛选的订单状态集合，可按需增加多个状态。 */
+    private static final Set<String> TARGET_ORDER_STATUSES = Collections.unmodifiableSet(new LinkedHashSet<String>(
+            Arrays.asList("已成团")
+    ));
 
     /** 输入 CSV 表头字段。 */
     private static final String COL_PAY_TIME = "支付时间";
@@ -79,25 +85,60 @@ public class ShopOrderExporter {
     ));
 
     public static void main(String[] args) throws IOException {
-        Map<String, Set<String>> shopGoodsMap = buildShopGoodsMap();
+        Map<String, Set<String>> shopGoodsMap = loadShopGoodsMapFromFile();
         new ShopOrderExporter().export(shopGoodsMap);
     }
 
     /**
-     * 店铺与商品 ID 的固定配置。
+     * 从指定文件读取店铺与商品 ID 的关系。
      *
-     * <p>Java 8 没有 Set.of，因此使用 helper 方法构造不可变 Set，保证 Java 8+ 可运行。</p>
+     * <p>文件格式：一行一组数据，店铺名称和商品 ID 之间使用一个或多个空白字符分隔，例如：</p>
+     * <pre>
+     * aaa 111
+     * aaa 112
+     * bbb 114
+     * ccc 221
+     * </pre>
+     *
+     * <p>空行和以 # 开头的注释行会被忽略。</p>
      */
-    private static Map<String, Set<String>> buildShopGoodsMap() {
-        Map<String, Set<String>> shopGoodsMap = new LinkedHashMap<String, Set<String>>();
-        shopGoodsMap.put("aaa", setOf("111", "112", "113"));
-        shopGoodsMap.put("bbb", setOf("114"));
-        shopGoodsMap.put("ccc", setOf("221", "225"));
-        return shopGoodsMap;
-    }
+    private static Map<String, Set<String>> loadShopGoodsMapFromFile() throws IOException {
+        Path configPath = Paths.get(SHOP_GOODS_FILE);
+        if (!Files.exists(configPath)) {
+            throw new IllegalArgumentException("店铺商品关系文件不存在：" + configPath.toAbsolutePath());
+        }
 
-    private static Set<String> setOf(String... values) {
-        return Collections.unmodifiableSet(new HashSet<String>(Arrays.asList(values)));
+        Map<String, Set<String>> shopGoodsMap = new LinkedHashMap<String, Set<String>>();
+        try (BufferedReader reader = Files.newBufferedReader(configPath, StandardCharsets.UTF_8)) {
+            String line;
+            int lineNo = 0;
+            while ((line = reader.readLine()) != null) {
+                lineNo++;
+                line = line.trim();
+                if (line.length() == 0 || line.startsWith("#")) {
+                    continue;
+                }
+
+                String[] parts = line.split("\\s+");
+                if (parts.length != 2 || parts[0].trim().length() == 0 || parts[1].trim().length() == 0) {
+                    throw new IllegalArgumentException("店铺商品关系文件第 " + lineNo + " 行格式错误，应为：店铺名称 空格 商品ID");
+                }
+
+                String shopName = parts[0].trim();
+                String goodsId = parts[1].trim();
+                Set<String> goodsIds = shopGoodsMap.get(shopName);
+                if (goodsIds == null) {
+                    goodsIds = new LinkedHashSet<String>();
+                    shopGoodsMap.put(shopName, goodsIds);
+                }
+                goodsIds.add(goodsId);
+            }
+        }
+
+        if (shopGoodsMap.isEmpty()) {
+            throw new IllegalArgumentException("店铺商品关系文件为空或没有有效配置：" + configPath.toAbsolutePath());
+        }
+        return shopGoodsMap;
     }
 
     /**
@@ -112,7 +153,7 @@ public class ShopOrderExporter {
         Files.createDirectories(outputDir);
 
         Map<String, String> goodsIdToShop = buildGoodsIdToShopIndex(shopGoodsMap);
-        Map<String, OrderWriter> writers = createWriters(shopGoodsMap.keySet(), outputDir);
+        Map<String, OrderWriter> writers = new LinkedHashMap<String, OrderWriter>();
 
         long totalRows = 0L;
         long exportedRows = 0L;
@@ -127,22 +168,23 @@ public class ShopOrderExporter {
                     new FileInputStream(SOURCE_CSV), StandardCharsets.UTF_8), 1024 * 1024);
                  CSVParser parser = csvFormat.parse(reader)) {
 
-                validateRequiredHeaders(parser.getHeaderMap());
+                Map<String, String> headerNameMap = buildHeaderNameMap(parser.getHeaderMap());
+                writers = createWriters(shopGoodsMap.keySet(), outputDir);
 
                 for (CSVRecord record : parser) {
                     totalRows++;
 
-                    if (!TARGET_ORDER_STATUS.equals(get(record, COL_ORDER_STATUS))) {
+                    if (!TARGET_ORDER_STATUSES.contains(get(record, headerNameMap, COL_ORDER_STATUS))) {
                         continue;
                     }
 
-                    String goodsId = get(record, COL_GOODS_ID);
+                    String goodsId = get(record, headerNameMap, COL_GOODS_ID);
                     String shopName = goodsIdToShop.get(goodsId);
                     if (shopName == null) {
                         continue;
                     }
 
-                    writers.get(shopName).write(toExportRow(record));
+                    writers.get(shopName).write(toExportRow(record, headerNameMap));
                     exportedRows++;
                 }
             }
@@ -181,29 +223,100 @@ public class ShopOrderExporter {
         return writers;
     }
 
-    private void validateRequiredHeaders(Map<String, Integer> headerMap) {
+    /**
+     * 建立「标准表头 -> CSV 文件真实表头」映射。
+     *
+     * <p>有些 Excel 或第三方系统导出的 UTF-8 CSV 会在第一个表头前带 BOM，
+     * 例如真实表头可能是 "\uFEFF支付时间"。这里统一去掉 BOM 和首尾空白后再匹配，
+     * 避免明明有「支付时间」列却报缺少表头。</p>
+     */
+    private Map<String, String> buildHeaderNameMap(Map<String, Integer> headerMap) {
+        Map<String, String> normalizedToActualHeader = new HashMap<String, String>();
+        for (String actualHeader : headerMap.keySet()) {
+            String normalizedHeader = normalizeHeader(actualHeader);
+            if (normalizedHeader.length() > 0 && !normalizedToActualHeader.containsKey(normalizedHeader)) {
+                normalizedToActualHeader.put(normalizedHeader, actualHeader);
+            }
+        }
+
         List<String> missingHeaders = new ArrayList<String>();
-        for (String header : EXPORT_HEADERS) {
-            if (!headerMap.containsKey(header)) {
-                missingHeaders.add(header);
+        Map<String, String> headerNameMap = new HashMap<String, String>();
+        for (String requiredHeader : EXPORT_HEADERS) {
+            String actualHeader = normalizedToActualHeader.get(normalizeHeader(requiredHeader));
+            if (actualHeader == null) {
+                missingHeaders.add(requiredHeader);
+            } else {
+                headerNameMap.put(requiredHeader, actualHeader);
             }
         }
         if (!missingHeaders.isEmpty()) {
-            throw new IllegalArgumentException("输入 CSV 缺少必要表头：" + missingHeaders);
+            throw new IllegalArgumentException("输入 CSV 缺少必要表头：" + missingHeaders
+                    + "；实际读取到的表头：" + new ArrayList<String>(headerMap.keySet()));
         }
+        return headerNameMap;
     }
 
-    private List<String> toExportRow(CSVRecord record) {
+    private List<String> toExportRow(CSVRecord record, Map<String, String> headerNameMap) {
         List<String> row = new ArrayList<String>(EXPORT_HEADERS.size());
         for (String header : EXPORT_HEADERS) {
-            row.add(get(record, header));
+            if (COL_ORDER_AMOUNT.equals(header)) {
+                row.add(parseAmountAsDoubleString(get(record, headerNameMap, header)));
+            } else {
+                row.add(get(record, headerNameMap, header));
+            }
         }
         return row;
     }
 
-    private static String get(CSVRecord record, String header) {
-        String value = record.get(header);
+    /**
+     * 将金额字段统一转换为 double 字符串，无法解析时保留原值。
+     */
+    private static String parseAmountAsDoubleString(String amountText) {
+        if (amountText == null) {
+            return "";
+        }
+
+        String normalizedAmount = amountText.replace(",", "").trim();
+        if (normalizedAmount.length() == 0) {
+            return "";
+        }
+
+        try {
+            return String.format(Locale.ROOT, "%.2f", Double.parseDouble(normalizedAmount));
+        } catch (NumberFormatException ex) {
+            return amountText.trim();
+        }
+    }
+
+    private static String get(CSVRecord record, Map<String, String> headerNameMap, String header) {
+        String actualHeader = headerNameMap.get(header);
+        String value = actualHeader == null ? "" : record.get(actualHeader);
         return value == null ? "" : value.trim();
+    }
+
+    private static String normalizeHeader(String header) {
+        if (header == null) {
+            return "";
+        }
+
+        String normalizedHeader = header
+                .replace("\uFEFF", "")
+                .replace("\u200B", "")
+                .trim();
+
+        // 如果 CSV 文件以 UTF-8 BOM + 双引号开头，Commons CSV 可能会把第一个表头读成："支付时间"。
+        // 这里把表头首尾残留的英文/中文引号剥掉，再参与匹配。
+        while (normalizedHeader.length() > 0 && isQuote(normalizedHeader.charAt(0))) {
+            normalizedHeader = normalizedHeader.substring(1).trim();
+        }
+        while (normalizedHeader.length() > 0 && isQuote(normalizedHeader.charAt(normalizedHeader.length() - 1))) {
+            normalizedHeader = normalizedHeader.substring(0, normalizedHeader.length() - 1).trim();
+        }
+        return normalizedHeader;
+    }
+
+    private static boolean isQuote(char value) {
+        return value == '"' || value == '\'' || value == '“' || value == '”' || value == '‘' || value == '’';
     }
 
     private static String sanitizeFileName(String fileName) {
@@ -264,6 +377,7 @@ public class ShopOrderExporter {
     /** XLSX 输出实现：使用 SXSSFWorkbook 流式写入，适合较大的导出结果。 */
     private static class XlsxOrderWriter implements OrderWriter {
         private static final int ROW_ACCESS_WINDOW_SIZE = 500;
+        private static final String EXCEL_FONT_NAME = "Arial";
 
         private final Path outputFile;
         private final SXSSFWorkbook workbook;
@@ -312,6 +426,7 @@ public class ShopOrderExporter {
 
         private static CellStyle createHeaderStyle(SXSSFWorkbook workbook) {
             Font font = workbook.createFont();
+            font.setFontName(EXCEL_FONT_NAME);
             font.setBold(true);
 
             CellStyle style = workbook.createCellStyle();
