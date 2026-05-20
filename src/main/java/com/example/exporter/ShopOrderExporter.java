@@ -33,6 +33,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Locale;
 import java.util.Set;
 
 /**
@@ -60,8 +61,10 @@ public class ShopOrderExporter {
     /** true 输出 xlsx；false 输出 csv。 */
     private static final boolean EXPORT_XLSX = true;
 
-    /** 输入 CSV 中用于筛选订单状态的固定值。 */
-    private static final String TARGET_ORDER_STATUS = "已成团";
+    /** 输入 CSV 中用于筛选的订单状态集合，可按需增加多个状态。 */
+    private static final Set<String> TARGET_ORDER_STATUSES = Collections.unmodifiableSet(new LinkedHashSet<String>(
+            Arrays.asList("已成团")
+    ));
 
     /** 输入 CSV 表头字段。 */
     private static final String COL_PAY_TIME = "支付时间";
@@ -171,7 +174,7 @@ public class ShopOrderExporter {
                 for (CSVRecord record : parser) {
                     totalRows++;
 
-                    if (!TARGET_ORDER_STATUS.equals(get(record, headerNameMap, COL_ORDER_STATUS))) {
+                    if (!TARGET_ORDER_STATUSES.contains(get(record, headerNameMap, COL_ORDER_STATUS))) {
                         continue;
                     }
 
@@ -256,9 +259,33 @@ public class ShopOrderExporter {
     private List<String> toExportRow(CSVRecord record, Map<String, String> headerNameMap) {
         List<String> row = new ArrayList<String>(EXPORT_HEADERS.size());
         for (String header : EXPORT_HEADERS) {
-            row.add(get(record, headerNameMap, header));
+            if (COL_ORDER_AMOUNT.equals(header)) {
+                row.add(parseAmountAsDoubleString(get(record, headerNameMap, header)));
+            } else {
+                row.add(get(record, headerNameMap, header));
+            }
         }
         return row;
+    }
+
+    /**
+     * 将金额字段统一转换为 double 字符串，无法解析时保留原值。
+     */
+    private static String parseAmountAsDoubleString(String amountText) {
+        if (amountText == null) {
+            return "";
+        }
+
+        String normalizedAmount = amountText.replace(",", "").trim();
+        if (normalizedAmount.length() == 0) {
+            return "";
+        }
+
+        try {
+            return String.format(Locale.ROOT, "%.2f", Double.parseDouble(normalizedAmount));
+        } catch (NumberFormatException ex) {
+            return amountText.trim();
+        }
     }
 
     private static String get(CSVRecord record, Map<String, String> headerNameMap, String header) {

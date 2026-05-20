@@ -104,9 +104,28 @@ private static final boolean EXPORT_XLSX = true;
 4. 使用 Apache Commons CSV 解析订单 CSV，支持字段中带逗号、引号、换行的标准 CSV。
 5. 先把店铺商品配置转换为 `商品 ID -> 店铺名称` 的反向索引，避免每一行订单都遍历所有店铺，提高大文件处理性能。
 6. 逐行读取 CSV，不把输入订单文件整体加载到内存。
-7. 仅当 `订单状态 = 已成团` 且 `商品id` 命中配置时才导出。
+7. 仅当 `订单状态` 命中代码中的状态集合（可配置多个，例如：已成团、已完成）且 `商品id` 命中配置时才导出。
 8. 程序启动时为每个店铺动态创建一个输出 writer。
 9. 输出目录不存在时会自动创建。
+
+
+
+## 状态筛选配置（支持多个）
+
+在 `ShopOrderExporter.java` 中通过集合配置可导出的订单状态，例如：
+
+```java
+private static final Set<String> TARGET_ORDER_STATUSES = Collections.unmodifiableSet(new LinkedHashSet<String>(
+        Arrays.asList("已成团", "已完成")
+));
+```
+
+你可以按需继续添加状态。
+
+## 金额字段说明（按 double 输出）
+
+导出时会把 `订单金额(元)` 尝试解析为 `double` 并统一格式化为两位小数（例如 `12` -> `12.00`，`12.3` -> `12.30`）。
+如果原值不是合法数字，会保留原文本避免丢失数据。
 
 ## 如何在 IDEA 中运行
 
