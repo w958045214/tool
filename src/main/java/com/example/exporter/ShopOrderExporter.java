@@ -150,7 +150,7 @@ public class ShopOrderExporter {
         Files.createDirectories(outputDir);
 
         Map<String, String> goodsIdToShop = buildGoodsIdToShopIndex(shopGoodsMap);
-        Map<String, OrderWriter> writers = createWriters(shopGoodsMap.keySet(), outputDir);
+        Map<String, OrderWriter> writers = new LinkedHashMap<String, OrderWriter>();
 
         long totalRows = 0L;
         long exportedRows = 0L;
@@ -165,22 +165,23 @@ public class ShopOrderExporter {
                     new FileInputStream(SOURCE_CSV), StandardCharsets.UTF_8), 1024 * 1024);
                  CSVParser parser = csvFormat.parse(reader)) {
 
-                validateRequiredHeaders(parser.getHeaderMap());
+                Map<String, String> headerNameMap = buildHeaderNameMap(parser.getHeaderMap());
+                writers = createWriters(shopGoodsMap.keySet(), outputDir);
 
                 for (CSVRecord record : parser) {
                     totalRows++;
 
-                    if (!TARGET_ORDER_STATUS.equals(get(record, COL_ORDER_STATUS))) {
+                    if (!TARGET_ORDER_STATUS.equals(get(record, headerNameMap, COL_ORDER_STATUS))) {
                         continue;
                     }
 
-                    String goodsId = get(record, COL_GOODS_ID);
+                    String goodsId = get(record, headerNameMap, COL_GOODS_ID);
                     String shopName = goodsIdToShop.get(goodsId);
                     if (shopName == null) {
                         continue;
                     }
 
-                    writers.get(shopName).write(toExportRow(record));
+                    writers.get(shopName).write(toExportRow(record, headerNameMap));
                     exportedRows++;
                 }
             }
@@ -219,29 +220,58 @@ public class ShopOrderExporter {
         return writers;
     }
 
-    private void validateRequiredHeaders(Map<String, Integer> headerMap) {
+    /**
+     * 建立「标准表头 -> CSV 文件真实表头」映射。
+     *
+     * <p>有些 Excel 或第三方系统导出的 UTF-8 CSV 会在第一个表头前带 BOM，
+     * 例如真实表头可能是 "\uFEFF支付时间"。这里统一去掉 BOM 和首尾空白后再匹配，
+     * 避免明明有「支付时间」列却报缺少表头。</p>
+     */
+    private Map<String, String> buildHeaderNameMap(Map<String, Integer> headerMap) {
+        Map<String, String> normalizedToActualHeader = new HashMap<String, String>();
+        for (String actualHeader : headerMap.keySet()) {
+            String normalizedHeader = normalizeHeader(actualHeader);
+            if (normalizedHeader.length() > 0 && !normalizedToActualHeader.containsKey(normalizedHeader)) {
+                normalizedToActualHeader.put(normalizedHeader, actualHeader);
+            }
+        }
+
         List<String> missingHeaders = new ArrayList<String>();
-        for (String header : EXPORT_HEADERS) {
-            if (!headerMap.containsKey(header)) {
-                missingHeaders.add(header);
+        Map<String, String> headerNameMap = new HashMap<String, String>();
+        for (String requiredHeader : EXPORT_HEADERS) {
+            String actualHeader = normalizedToActualHeader.get(normalizeHeader(requiredHeader));
+            if (actualHeader == null) {
+                missingHeaders.add(requiredHeader);
+            } else {
+                headerNameMap.put(requiredHeader, actualHeader);
             }
         }
         if (!missingHeaders.isEmpty()) {
-            throw new IllegalArgumentException("输入 CSV 缺少必要表头：" + missingHeaders);
+            throw new IllegalArgumentException("输入 CSV 缺少必要表头：" + missingHeaders
+                    + "；实际读取到的表头：" + new ArrayList<String>(headerMap.keySet()));
         }
+        return headerNameMap;
     }
 
-    private List<String> toExportRow(CSVRecord record) {
+    private List<String> toExportRow(CSVRecord record, Map<String, String> headerNameMap) {
         List<String> row = new ArrayList<String>(EXPORT_HEADERS.size());
         for (String header : EXPORT_HEADERS) {
-            row.add(get(record, header));
+            row.add(get(record, headerNameMap, header));
         }
         return row;
     }
 
-    private static String get(CSVRecord record, String header) {
-        String value = record.get(header);
+    private static String get(CSVRecord record, Map<String, String> headerNameMap, String header) {
+        String actualHeader = headerNameMap.get(header);
+        String value = actualHeader == null ? "" : record.get(actualHeader);
         return value == null ? "" : value.trim();
+    }
+
+    private static String normalizeHeader(String header) {
+        if (header == null) {
+            return "";
+        }
+        return header.replace("\uFEFF", "").trim();
     }
 
     private static String sanitizeFileName(String fileName) {
@@ -302,6 +332,7 @@ public class ShopOrderExporter {
     /** XLSX 输出实现：使用 SXSSFWorkbook 流式写入，适合较大的导出结果。 */
     private static class XlsxOrderWriter implements OrderWriter {
         private static final int ROW_ACCESS_WINDOW_SIZE = 500;
+        private static final String EXCEL_FONT_NAME = "Arial";
 
         private final Path outputFile;
         private final SXSSFWorkbook workbook;
@@ -350,6 +381,7 @@ public class ShopOrderExporter {
 
         private static CellStyle createHeaderStyle(SXSSFWorkbook workbook) {
             Font font = workbook.createFont();
+            font.setFontName(EXCEL_FONT_NAME);
             font.setBold(true);
 
             CellStyle style = workbook.createCellStyle();
