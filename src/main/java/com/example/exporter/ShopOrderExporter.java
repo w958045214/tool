@@ -271,7 +271,25 @@ public class ShopOrderExporter {
         if (header == null) {
             return "";
         }
-        return header.replace("\uFEFF", "").trim();
+
+        String normalizedHeader = header
+                .replace("\uFEFF", "")
+                .replace("\u200B", "")
+                .trim();
+
+        // 如果 CSV 文件以 UTF-8 BOM + 双引号开头，Commons CSV 可能会把第一个表头读成："支付时间"。
+        // 这里把表头首尾残留的英文/中文引号剥掉，再参与匹配。
+        while (normalizedHeader.length() > 0 && isQuote(normalizedHeader.charAt(0))) {
+            normalizedHeader = normalizedHeader.substring(1).trim();
+        }
+        while (normalizedHeader.length() > 0 && isQuote(normalizedHeader.charAt(normalizedHeader.length() - 1))) {
+            normalizedHeader = normalizedHeader.substring(0, normalizedHeader.length() - 1).trim();
+        }
+        return normalizedHeader;
+    }
+
+    private static boolean isQuote(char value) {
+        return value == '"' || value == '\'' || value == '“' || value == '”' || value == '‘' || value == '’';
     }
 
     private static String sanitizeFileName(String fileName) {
