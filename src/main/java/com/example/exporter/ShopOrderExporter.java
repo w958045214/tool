@@ -12,6 +12,7 @@ import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.xssf.streaming.SXSSFWorkbook;
 
 import java.io.BufferedReader;
+import java.math.BigDecimal;
 import java.io.BufferedWriter;
 import java.io.Closeable;
 import java.io.FileInputStream;
@@ -256,35 +257,53 @@ public class ShopOrderExporter {
         return headerNameMap;
     }
 
-    private List<String> toExportRow(CSVRecord record, Map<String, String> headerNameMap) {
+    private ExportRow toExportRow(CSVRecord record, Map<String, String> headerNameMap) {
         List<String> row = new ArrayList<String>(EXPORT_HEADERS.size());
+        Double amountValue = null;
         for (String header : EXPORT_HEADERS) {
             if (COL_ORDER_AMOUNT.equals(header)) {
-                row.add(parseAmountAsDoubleString(get(record, headerNameMap, header)));
+                ParsedAmount parsedAmount = parseAmount(get(record, headerNameMap, header));
+                row.add(parsedAmount.displayText);
+                amountValue = parsedAmount.numericValue;
             } else {
                 row.add(get(record, headerNameMap, header));
             }
         }
-        return row;
+        return new ExportRow(row, amountValue);
     }
 
     /**
-     * 将金额字段统一转换为 double 字符串，无法解析时保留原值。
+     * 将金额字段统一转换为 double，返回展示文本和可写入数值。
      */
-    private static String parseAmountAsDoubleString(String amountText) {
+    private static ParsedAmount parseAmount(String amountText) {
         if (amountText == null) {
-            return "";
+            return new ParsedAmount("", null);
         }
 
         String normalizedAmount = amountText.replace(",", "").trim();
+        while (normalizedAmount.length() > 0
+                && (normalizedAmount.charAt(0) == '\'' || normalizedAmount.charAt(0) == '’')) {
+            normalizedAmount = normalizedAmount.substring(1).trim();
+        }
+
+        normalizedAmount = normalizedAmount
+                .replace("¥", "")
+                .replace("￥", "")
+                .replace("元", "")
+                .replace(" ", "")
+                .trim();
+
         if (normalizedAmount.length() == 0) {
-            return "";
+            return new ParsedAmount("", null);
         }
 
         try {
-            return String.format(Locale.ROOT, "%.2f", Double.parseDouble(normalizedAmount));
+            BigDecimal decimalValue = new BigDecimal(normalizedAmount);
+            double numericValue = decimalValue.doubleValue();
+            String displayText = String.format(Locale.ROOT, "%.2f", numericValue);
+            return new ParsedAmount(displayText, numericValue);
         } catch (NumberFormatException ex) {
-            return amountText.trim();
+            return new ParsedAmount(normalizedAmount, null);
         }
     }
 
@@ -341,11 +360,33 @@ public class ShopOrderExporter {
         }
     }
 
+
+    /** 单行导出数据，包含展示文本和金额数值。 */
+    private static class ExportRow {
+        private final List<String> values;
+        private final Double amountNumeric;
+
+        ExportRow(List<String> values, Double amountNumeric) {
+            this.values = values;
+            this.amountNumeric = amountNumeric;
+        }
+    }
+
+    private static class ParsedAmount {
+        private final String displayText;
+        private final Double numericValue;
+
+        ParsedAmount(String displayText, Double numericValue) {
+            this.displayText = displayText;
+            this.numericValue = numericValue;
+        }
+    }
+
     /** 订单输出抽象，便于 CSV / XLSX 两种格式切换。 */
     private interface OrderWriter extends Closeable {
         void writeHeader(List<String> headers) throws IOException;
 
-        void write(List<String> values) throws IOException;
+        void write(ExportRow row) throws IOException;
     }
 
     /** CSV 输出实现：使用 Apache Commons CSV 正确处理逗号、引号、换行等特殊字符。 */
@@ -364,8 +405,8 @@ public class ShopOrderExporter {
         }
 
         @Override
-        public void write(List<String> values) throws IOException {
-            printer.printRecord(values);
+        public void write(ExportRow row) throws IOException {
+            printer.printRecord(row.values);
         }
 
         @Override
@@ -383,6 +424,7 @@ public class ShopOrderExporter {
         private final SXSSFWorkbook workbook;
         private final Sheet sheet;
         private final CellStyle headerStyle;
+        private final CellStyle amountCellStyle;
         private int rowIndex = 0;
 
         XlsxOrderWriter(Path outputFile) {
@@ -391,6 +433,7 @@ public class ShopOrderExporter {
             this.workbook.setCompressTempFiles(true);
             this.sheet = workbook.createSheet("orders");
             this.headerStyle = createHeaderStyle(workbook);
+            this.amountCellStyle = createAmountStyle(workbook);
         }
 
         @Override
@@ -404,10 +447,16 @@ public class ShopOrderExporter {
         }
 
         @Override
-        public void write(List<String> values) {
+        public void write(ExportRow exportRow) {
             Row row = sheet.createRow(rowIndex++);
-            for (int i = 0; i < values.size(); i++) {
-                row.createCell(i).setCellValue(values.get(i));
+            for (int i = 0; i < exportRow.values.size(); i++) {
+                Cell cell = row.createCell(i);
+                if (i == EXPORT_HEADERS.size() - 1 && exportRow.amountNumeric != null) {
+                    cell.setCellValue(exportRow.amountNumeric.doubleValue());
+                    cell.setCellStyle(amountCellStyle);
+                } else {
+                    cell.setCellValue(exportRow.values.get(i));
+                }
             }
         }
 
@@ -431,6 +480,12 @@ public class ShopOrderExporter {
 
             CellStyle style = workbook.createCellStyle();
             style.setFont(font);
+            return style;
+        }
+
+        private static CellStyle createAmountStyle(SXSSFWorkbook workbook) {
+            CellStyle style = workbook.createCellStyle();
+            style.setDataFormat(workbook.createDataFormat().getFormat("0.00"));
             return style;
         }
     }
