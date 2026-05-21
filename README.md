@@ -1,0 +1,164 @@
+# shop-order-exporter
+
+一个完整可运行的 Java 8+ Maven 项目，用于本地读取大型订单 CSV 文件，并根据指定配置文件中的「店铺名称 + 商品 ID」关系，按店铺分别导出 CSV 或 XLSX 文件。
+
+> 运行方式以 IDEA 直接点击 `ShopOrderExporter.main()` 为主，不需要打包成 jar 后运行。
+
+## 项目结构
+
+```text
+shop-order-exporter/
+├── pom.xml
+├── README.md
+└── src/
+    └── main/
+        └── java/
+            └── com/
+                └── example/
+                    └── exporter/
+                        └── ShopOrderExporter.java
+```
+
+## Maven 依赖
+
+项目使用以下核心依赖：
+
+- `org.apache.commons:commons-csv`：流式读取和写入 CSV，兼容字段中包含逗号、引号、换行等场景。
+- `org.apache.poi:poi-ooxml`：通过 `SXSSFWorkbook` 流式写入 XLSX，降低大文件导出时的内存占用。
+
+完整 Maven 配置见 [`pom.xml`](pom.xml)。`pom.xml` 只保留编译插件和依赖声明，方便 IDEA 直接导入并运行主程序。
+
+## 输入 CSV 表头
+
+输入文件需要包含以下字段：
+
+```text
+支付时间
+订单号
+商品名称
+商品id
+招商团长昵称
+招商duoid
+推手昵称
+推手duoid
+订单状态
+订单金额(元)
+招商佣金
+招商收入(元)
+预估软件服务费(元)
+```
+
+程序最终只导出：
+
+```text
+支付时间,订单号,商品名称,商品id,订单状态,订单金额(元)
+```
+
+## 店铺商品关系配置文件
+
+店铺名称和商品 ID 不需要再写死在 Java 代码里。程序会从固定路径读取配置文件：
+
+```java
+private static final String SHOP_GOODS_FILE = "/Users/test/Desktop/shop_goods.txt";
+```
+
+文件格式：一行一组数据，店铺名称和商品 ID 之间用空格分隔。
+
+```text
+aaa 111
+aaa 112
+aaa 113
+bbb 114
+ccc 221
+ccc 225
+```
+
+说明：
+
+1. 同一个店铺可以配置多行商品 ID。
+2. 空行会自动忽略。
+3. 以 `#` 开头的注释行会自动忽略。
+4. 同一个商品 ID 不允许配置到多个店铺，否则程序会直接报错，避免导出归属不明确。
+
+## 修改固定路径和输出格式
+
+打开 `src/main/java/com/example/exporter/ShopOrderExporter.java`，按实际情况修改这几个常量：
+
+```java
+private static final String SOURCE_CSV = "/Users/test/Desktop/order.csv";
+private static final String SHOP_GOODS_FILE = "/Users/test/Desktop/shop_goods.txt";
+private static final String OUTPUT_DIR = "/Users/test/Desktop/output/";
+private static final boolean EXPORT_XLSX = true;
+```
+
+`EXPORT_XLSX` 规则：
+
+- `true`：按店铺输出 `aaa.xlsx`、`bbb.xlsx`、`ccc.xlsx`
+- `false`：按店铺输出 `aaa.csv`、`bbb.csv`、`ccc.csv`
+
+## 关键逻辑说明
+
+1. 启动后直接读取 `SOURCE_CSV`，无需命令行输入。
+2. 启动时先读取 `SHOP_GOODS_FILE`，自动组装成 `Map<String, Set<String>>`。
+3. 使用 UTF-8 编码读取订单 CSV 和店铺商品关系文件。
+4. 使用 Apache Commons CSV 解析订单 CSV，支持字段中带逗号、引号、换行的标准 CSV。
+5. 先把店铺商品配置转换为 `商品 ID -> 店铺名称` 的反向索引，避免每一行订单都遍历所有店铺，提高大文件处理性能。
+6. 逐行读取 CSV，不把输入订单文件整体加载到内存。
+7. 仅当 `订单状态` 命中代码中的状态集合（可配置多个，例如：已成团、已完成）且 `商品id` 命中配置时才导出。
+8. 程序启动时为每个店铺动态创建一个输出 writer。
+9. 输出目录不存在时会自动创建。
+
+
+
+## 状态筛选配置（支持多个）
+
+在 `ShopOrderExporter.java` 中通过集合配置可导出的订单状态，例如：
+
+```java
+private static final Set<String> TARGET_ORDER_STATUSES = Collections.unmodifiableSet(new LinkedHashSet<String>(
+        Arrays.asList("已成团", "已完成")
+));
+```
+
+你可以按需继续添加状态。
+
+## 金额字段说明（按 double 输出）
+
+导出时会把 `订单金额(元)` 尝试解析为 `double` 并统一格式化为两位小数（例如 `12` -> `12.00`，`12.3` -> `12.30`）。
+如果原值不是合法数字，会保留原文本避免丢失数据。
+
+如果原始金额前面带有隐藏前缀（例如 Excel 常见的前导单引号 `'11.74`），程序会自动去掉前缀后再按数字输出，减少“数字被识别为文本”的情况。
+
+
+> 注意：CSV 本质是纯文本格式，是否被 Excel/WPS 自动识别为数值依赖本地导入规则；若你需要“打开即稳定可求和”，建议把 `EXPORT_XLSX` 设为 `true`，程序会把金额列按真正数值单元格写入。
+
+XLSX 导出时金额列会按数值单元格写入并使用 `0.00` 数字格式，可直接求和。
+
+## 如何在 IDEA 中运行
+
+1. 用 IDEA 打开项目根目录。
+2. 等待 IDEA 根据 `pom.xml` 下载并加载 Maven 依赖。
+3. 修改 `ShopOrderExporter.java` 中的 `SOURCE_CSV`、`SHOP_GOODS_FILE`、`OUTPUT_DIR`、`EXPORT_XLSX`。
+4. 准备好订单 CSV 文件和店铺商品关系文件。
+5. 直接点击 `ShopOrderExporter` 类中 `main` 方法左侧的运行按钮。
+6. 运行完成后，程序会在 `OUTPUT_DIR` 下生成按店铺拆分的文件。
+
+## 可选命令行编译检查
+
+如果本地 Maven 环境可用，也可以执行：
+
+```bash
+mvn clean compile
+```
+
+但日常使用不需要打包，直接在 IDEA 运行主程序即可。
+
+## 常见问题
+
+### 明明有「支付时间」却提示缺少表头
+
+部分工具导出的 UTF-8 CSV 会在第一个表头前写入 BOM，导致程序实际读到的第一个表头类似 `\uFEFF支付时间`。如果文件开头是 BOM 后紧跟双引号，也可能被读成 `\uFEFF"支付时间"`。代码已经对表头做了 BOM、零宽字符、首尾空白和外层引号兼容处理；如果仍然报缺少表头，异常信息会同时打印程序实际读取到的表头，方便对照 CSV 文件。
+
+### XLSX 导出时出现 Times / Serif 字体警告
+
+代码创建 XLSX 表头样式时显式使用 `Arial` 字体，避免依赖 Java 逻辑字体 `Serif` 的默认映射。如果本机仍然打印字体警告，一般是 JDK 字体环境缺少对应字体导致的警告，不影响 CSV 解析；可以安装/恢复系统字体，或把 `EXPORT_XLSX` 改为 `false` 先导出 CSV。
